@@ -118,6 +118,37 @@ diff { skip { drop_foreign_key = true } }
 This stops Atlas auto-dropping FKs (trade-off: removing one becomes manual too).
 Same pattern for triggers/views/etc. — add by hand, `skip` the matching drop.
 
+### Postgres enums
+
+Bun can use an enum column (`bun:"priority,type:task_priority"`) but the provider
+only emits the column, NOT the `CREATE TYPE` — so a bare enum field makes
+`migrate diff` fail (`type "task_priority" does not exist`). A manual CREATE TYPE
+alone won't fix it (the loader's desired can't build without the type). **Fix:
+have the loader emit the type** (it's a program printing DDL):
+
+```go
+// loader/main.go — before writing the bunschema DDL:
+io.WriteString(os.Stdout, "CREATE TYPE task_priority AS ENUM ('low', 'high');\n")
+```
+
+The type is then in *desired*, so Atlas manages it with NO drift (no diff.skip).
+The loader's `ENUM (...)` list is the source of truth — keep it in sync with the
+Go constants.
+
+**Changing an enum** (update the loader list + Go consts, then `migrate diff`):
+- **Add** a value → automatic: `ALTER TYPE … ADD VALUE 'x' AFTER 'y'`. (PG: the
+  new value can't be used in the same transaction it's added — split it out or
+  `-- atlas:txmode none` if a later statement uses it.)
+- **Remove** a value → diff emits NOTHING (PG has no DROP VALUE). Manual
+  recreate-the-type migration: migrate rows off it, `RENAME TYPE … _old`,
+  `CREATE TYPE` with the new list, `ALTER COLUMN … TYPE … USING …::text::…`,
+  `DROP TYPE … _old`; then update the loader list.
+- **Rename** a value → diff treats it as ADD (orphans the old). Manual
+  `ALTER TYPE … RENAME VALUE 'old' TO 'new'`; update loader + consts.
+
+Only ADD is free. For value sets that churn, prefer `varchar` + CHECK or
+app-validated text instead of a PG enum.
+
 ## Changing a migration that's created but NOT yet applied
 
 Safe while unapplied everywhere — just keep `atlas.sum` in sync:

@@ -364,6 +364,67 @@ types (`drop_table`, `drop_column`, …) — the general pattern for **any** obj
 the Bun model can't express (triggers, functions, views, partial indexes): add it
 by hand, and `skip` the matching drop so it doesn't drift.
 
+### Postgres enums (loader-emitted types)
+
+Atlas fully supports PG enums, and Bun can *use* an enum column
+(`bun:"priority,type:task_priority"`) — but the Bun provider only emits the
+column, **never the `CREATE TYPE`** (the struct tag carries the type name, not its
+values). So a bare enum field makes `migrate diff` fail:
+
+```
+Error: ... pq: type "task_priority" does not exist (42704)
+```
+
+A manual `CREATE TYPE` migration alone doesn't fix it either: the loader's
+*desired* schema references the type, so Atlas can't even build desired in the dev
+DB without it. **The fix is to have the loader emit the type** — it's just a
+program printing DDL, so prepend the `CREATE TYPE` before the Bun output:
+
+```go
+// loader/main.go
+io.WriteString(os.Stdout, "CREATE TYPE task_priority AS ENUM ('low', 'high');\n")
+io.WriteString(os.Stdout, stmts) // the bunschema DDL
+```
+
+Now `migrate diff` produces the full thing, and because the type is in *desired*
+Atlas **manages it with no drift** (no `diff.skip` needed):
+
+```sql
+CREATE TYPE "task_priority" AS ENUM ('low', 'high');
+ALTER TABLE "tasks" ADD COLUMN "priority" "task_priority" NOT NULL DEFAULT 'low';
+```
+
+The loader's `ENUM (...)` list is now the **source of truth** for the type. Keep
+it in lockstep with your Go constants.
+
+**Changing an enum is mostly a Postgres-limitation story.** Update the loader
+list + Go constants, then `migrate diff` — but only *adding* is automatic:
+
+| Change | `migrate diff` result | What to do |
+| ------ | --------------------- | ---------- |
+| **Add** a value | `ALTER TYPE … ADD VALUE 'medium' AFTER 'low'` (position preserved) | ✅ automatic. PG caveat: a value added by `ADD VALUE` can't be *used* in the same transaction — if a later statement in the same migration inserts rows using it, split it out or add `-- atlas:txmode none`. |
+| **Remove** a value | *no changes* — silently ignored (PG has no `DROP VALUE`) | manual **recreate-the-type** migration (below) |
+| **Rename** a value | `ALTER TYPE … ADD VALUE 'urgent'` — adds the new, **leaves the old** (not a rename!) | manual `ALTER TYPE … RENAME VALUE 'high' TO 'urgent'` (PG updates rows in place); update the loader + consts |
+
+Manual **remove** (recreate the type — `task migrate-new -- shrink_priority`):
+
+```sql
+UPDATE tasks SET priority = 'low' WHERE priority = 'high';   -- migrate rows OFF the value first
+ALTER TYPE task_priority RENAME TO task_priority_old;
+CREATE TYPE task_priority AS ENUM ('low', 'medium');
+ALTER TABLE tasks ALTER COLUMN priority TYPE task_priority
+  USING priority::text::task_priority;
+DROP TYPE task_priority_old;
+```
+…then update the loader's `ENUM (...)` list so the next diff is in sync, and
+`atlas migrate hash`.
+
+> **`ADD` is the only "free" enum change.** Remove/rename/reorder are manual
+> because Postgres enums are hard to mutate. For value sets that churn, prefer a
+> `varchar` + `CHECK` constraint (or plain text validated in the app): changing
+> the allowed values is then editing a constraint or app code, not a type-recreate
+> dance. Enums win on strictness/storage; text+check wins on changeability.
+
 ### Merge conflicts in `atlas.sum` (two branches)
 
 `atlas.sum` is a top line — the `h1:` hash of the **whole directory** — followed
