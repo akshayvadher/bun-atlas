@@ -41,6 +41,26 @@ tasks:
     cmds:
       - atlas migrate status --env bun -u "$DATABASE_URL"
 
+  migrate-validate:
+    desc: Validate migration directory integrity (atlas.sum + replayable SQL). Runs offline; needs the dev DB on 5434 up.
+    cmds:
+      - atlas migrate validate --env bun
+
+  migrate-lint:
+    desc: "Lint the latest migration for destructive/unsafe changes. NOTE: since Atlas v0.38 this requires `atlas login` (free). Needs the dev DB up."
+    cmds:
+      - atlas migrate lint --env bun --latest 1
+
+  migrate-new:
+    desc: Create an empty MANUAL migration (data seed / custom SQL). Pass a name, edit the file, then run `task migrate-hash`. e.g. `task migrate-new -- seed_tasks`.
+    cmds:
+      - atlas migrate new {{.CLI_ARGS}} --dir "file://migrations"
+
+  migrate-hash:
+    desc: Recompute migrations/atlas.sum after hand-editing a migration file.
+    cmds:
+      - atlas migrate hash --dir "file://migrations"
+
   test:
     desc: Run the fast unit tests (no database required).
     cmds:

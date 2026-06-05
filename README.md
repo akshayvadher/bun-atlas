@@ -89,10 +89,15 @@ bunschema.New(bunschema.DialectPostgres).Load(&task.Task{}, &comment.Comment{})
 
 Adding a model means adding it there — then **one** `atlas migrate diff`
 regenerates the schema for all of them (the `comments` table arrived this way).
-`task_id` on a comment is a plain referencing column, **not** a DB-level foreign
-key: the Bun provider doesn't emit FK constraints, and a hand-added FK would
-drift on the next diff (see *Manual & data migrations* in the migrations guide).
-The relationship is enforced by the app — a comment on a missing task returns 404.
+
+The `comments.task_id → tasks.id` **foreign key** is a worked example of the
+"manual migration + drift" gotcha: the Bun provider doesn't emit FK constraints,
+so the FK is a hand-written migration
+(`migrations/*_add_comments_task_fk.sql`). Because that FK isn't in the
+model-derived desired state, a naive `migrate diff` would try to DROP it — so
+`atlas.hcl` carries a `diff { skip { drop_foreign_key = true } }` policy to stop
+that. The app *also* pre-checks the task exists (returns 404 rather than a raw FK
+violation). Full write-up in [`docs/migrations-guide.md`](docs/migrations-guide.md).
 
 ## Configuration
 

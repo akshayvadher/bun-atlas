@@ -79,7 +79,33 @@ reset every time.
 > **This is exactly why the loader-mode bug happened during the build.** In
 > standalone mode, the loader emitted DDL for *every* exported struct (including
 > `Handler`), so "desired" contained a phantom `handlers` table and the diff tried
-> to create it. Loader mode fixes "desired" to exactly `&task.Task{}`.
+> to create it. Loader mode fixes "desired" to exactly the registered models.
+
+### Which database is which (and do you always need the dev one?)
+
+Nothing magic marks one database as "real" and another as "throwaway" — it's the
+**role you give it in `atlas.hcl`**:
+
+- `dev = "postgres://…@localhost:5434/dev…"` — the **dev/scratch** database. Atlas
+  **resets it** on every `diff`/`lint`/`validate` to normalise and compute
+  schemas, so it must be disposable, with no data you care about. **Never point
+  `dev` at your app/prod database.**
+- The **target** (the DB you actually change) is **not** in `atlas.hcl` by
+  default; you pass it at apply time with `-u/--url` (e.g. `task migrate-apply`
+  uses `-u "$DATABASE_URL"` → 5433), or — for the init container — the `deploy`
+  env reads it from `DATABASE_URL` via `getenv`.
+
+So the two are distinguished by **attribute**, not by which container: `dev = …`
+is scratch; `--url`/`getenv` is the database receiving the migrations.
+
+**Do you always need a dev DB?** Only to **generate or analyse** migrations
+(`diff`, `lint`, `validate` — they build schemas in a clean DB). You do **not**
+need it to **apply** — `migrate apply` only touches the target DB, which is why
+the production init container ships no dev DB. The dev DB also needn't be a
+long-running container: `dev = "docker://postgres/15/dev"` makes Atlas spin up an
+ephemeral one per run (needs the Docker CLI); we use a podman container on 5434
+because this host has no docker. (SQLite users can even use
+`dev = "sqlite://file?mode=memory"`.)
 
 ---
 
@@ -148,7 +174,7 @@ flowchart TD
     U --> D["3 Generate migration:<br/>atlas migrate diff add_priority_to_tasks --env bun"]
     D --> R{"4 Review the generated SQL<br/>migrations/2026..._add_priority_to_tasks.sql"}
     R -->|wrong / surprising| E
-    R -->|looks right| L["5 (optional) atlas migrate lint --env bun --latest 1<br/>catch destructive / unsafe changes"]
+    R -->|looks right| L["5 atlas migrate validate (free, offline)<br/>+ optional lint (needs atlas login since v0.38)"]
     L --> AC["6 Expose it: add to DTOs in handler.go,<br/>Update column set in store.go"]
     AC --> T["7 task test  &&  task test-integration"]
     T --> C["8 Commit everything together (see below)"]
@@ -171,7 +197,10 @@ task migrate-diff -- add_priority_to_tasks
 task test
 task test-integration
 
-# 4. (optional but recommended) lint for unsafe changes
+# 4. integrity check — free and offline:
+atlas migrate validate --env bun
+#    lint adds destructive/locking-change analysis but, since Atlas v0.38,
+#    requires `atlas login` (free account):
 atlas migrate lint --env bun --latest 1
 ```
 
@@ -247,11 +276,92 @@ Safe to edit freely — nothing has run it. The only thing to keep in sync is
 | Discard it | `atlas migrate rm <version> --dir "file://migrations"` (deletes the file *and* updates `atlas.sum`) |
 | Regenerate from a changed model | `atlas migrate rm` it, fix the model, re-run `atlas migrate diff <name>` |
 
-Then sanity-check: `atlas migrate validate` and `atlas migrate lint --env bun --latest 1`.
+Then sanity-check with `atlas migrate validate` (free, offline). `atlas migrate
+lint` adds destructive-change analysis but requires `atlas login` since v0.38.
 
 > **Immutability boundary:** all of the above is safe *only while the migration is
 > unapplied in every shared environment*. Once it has run on staging/prod it is
 > frozen — never edit it; **fix forward** with a new migration.
+
+### Worked example — adding a foreign key by hand
+
+The Bun provider can't emit FK constraints, so a foreign key is a **manual
+migration**. This repo's `comments.task_id → tasks.id` FK was added exactly this way:
+
+```bash
+atlas migrate new add_comments_task_fk --dir "file://migrations"   # or: task migrate-new -- add_comments_task_fk
+```
+
+```sql
+-- in the generated file:
+ALTER TABLE "comments"
+  ADD CONSTRAINT "comments_task_id_fkey"
+  FOREIGN KEY ("task_id") REFERENCES "tasks" ("id") ON DELETE CASCADE;
+```
+
+```bash
+atlas migrate hash --dir "file://migrations"   # task migrate-hash
+task migrate-apply
+```
+
+**The drift trap:** the FK now lives in the migration history, but the
+model-derived "desired" state has *no* FK — so the **next** `migrate diff`
+generates `ALTER TABLE "comments" DROP CONSTRAINT "comments_task_id_fkey"` to
+"reconcile" them. Commit that and your FK is gone.
+
+**The fix** — tell Atlas never to auto-generate FK drops, via a `diff.skip` policy
+in the `env` block of `atlas.hcl`:
+
+```hcl
+env "bun" {
+  # ...
+  diff {
+    skip {
+      drop_foreign_key = true
+    }
+  }
+}
+```
+
+Now `migrate diff` reports the directory in sync and leaves the hand-managed FK
+alone. **Trade-off:** Atlas will no longer auto-drop *any* FK, so removing one is
+also a manual migration. The same `diff.skip` policy exists for other change
+types (`drop_table`, `drop_column`, …) — the general pattern for **any** object
+the Bun model can't express (triggers, functions, views, partial indexes): add it
+by hand, and `skip` the matching drop so it doesn't drift.
+
+### Merge conflicts in `atlas.sum` (two branches)
+
+`atlas.sum` is a top line — the `h1:` hash of the **whole directory** — followed
+by one hash line per file. Any added or changed migration changes both that file's
+line **and** the directory hash.
+
+So if your branch adds a migration and a teammate's branch independently adds
+another, **both touched `atlas.sum`**:
+
+- Git reports a **merge conflict** on `atlas.sum` (the single directory `h1:` line
+  can't be "both"). Even if Git auto-merges the per-file lines, the directory hash
+  is now wrong for the combined set.
+- Atlas refuses to run against a mismatched sum — `atlas migrate validate` /
+  `apply` fail with a **checksum mismatch**. That's the safety net: a half-merged
+  history can't be applied.
+
+**Fix** — keep *both* migration files, then recompute the hash:
+
+```bash
+atlas migrate hash --dir "file://migrations"   # recomputes the directory h1 + file lines
+atlas migrate validate --env bun               # confirm the directory is consistent
+```
+
+If the two new migrations interleave out of order (your timestamp predates a
+teammate's that already ran on a shared DB), use `atlas migrate rebase <version>`
+to move yours to the end of the history and re-hash. Keeping migrations strictly
+append-only (newest last) avoids "file out of order" errors at apply time.
+
+> The directory hash changing twice is not itself a problem — it's deterministic
+> from the file set, and `migrate hash` recomputes the correct value. The danger
+> is a *stale* `atlas.sum` that matches neither branch; Atlas detects that and
+> blocks `apply` until you re-hash.
 
 ## 6. What to do when a migration fails
 
@@ -359,11 +469,13 @@ If you rename `title` → `name` in the struct, Atlas diff typically generates
 generated SQL; for a true rename, hand-edit to `ALTER TABLE ... RENAME COLUMN`,
 then run `atlas migrate hash` so `atlas.sum` matches.
 
-### ④ Always review and lint
+### ④ Always review; validate (and lint)
 
-`atlas migrate diff` is mechanical; it doesn't know intent. `atlas migrate lint
---env bun --latest 1` flags destructive/irreversible/locking changes before they
-reach prod.
+`atlas migrate diff` is mechanical; it doesn't know intent — always read the
+generated SQL. `atlas migrate validate` checks directory integrity offline and
+for free. `atlas migrate lint --env bun --latest 1` adds destructive/irreversible/
+locking-change analysis, but **since Atlas v0.38 it requires `atlas login`** (free
+account) — so it's a great CI gate but no longer a purely-offline command.
 
 ### ⑤ `updated_at` is app-set, not DB-set here
 
@@ -383,11 +495,12 @@ atlas migrate status --env bun -u "$DATABASE_URL"
 # --- evolve the schema (dev time) ---
 task db-up                                  # dev DB must be up for diff
 task migrate-diff -- <descriptive_name>     # atlas migrate diff <name> --env bun
-atlas migrate lint --env bun --latest 1     # safety check
-atlas migrate hash                          # ONLY if you hand-edited an unshared migration
+task migrate-validate                       # integrity check (free, offline)
+task migrate-lint                           # destructive-change analysis (needs `atlas login` since v0.38)
+task migrate-hash                           # ONLY after hand-editing an unshared migration
 
-# --- manual / data migration (INSERT, custom SQL) ---
-atlas migrate new <name> --dir "file://migrations"   # empty file to fill in, then `migrate hash`
+# --- manual / data migration (INSERT, custom SQL, foreign keys) ---
+task migrate-new -- <name>                  # empty file to fill in, then `task migrate-hash`
 
 # --- change an UNAPPLIED migration ---
 atlas migrate edit <version>                # edit + re-hash in one step

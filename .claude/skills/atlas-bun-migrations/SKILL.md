@@ -8,11 +8,15 @@ description: Use when changing the database schema in this repo (add/alter/remov
 The Bun model is the **single source of truth**. You never hand-write SQL.
 Atlas derives versioned migrations from the model; the database consumes them.
 
-- Model: `internal/task/model.go` (the `Task` struct, bun tags).
+- Models: `internal/task/model.go` (`Task`), `internal/comment/model.go`
+  (`Comment`, attached to a task by `task_id`).
 - Generated migrations: `migrations/*.sql` + `migrations/atlas.sum` (committed).
-- Provider: **loader mode** — `loader/main.go` registers exactly `&task.Task{}`;
-  `atlas.hcl` runs `go run ./loader`. (Standalone `--path` mode is NOT used: its
-  scanner treats every exported struct as a table and emits a phantom `handlers`.)
+- Provider: **loader mode** — `loader/main.go` registers **all** models in one
+  `Load(&task.Task{}, &comment.Comment{})` call; `atlas.hcl` runs `go run ./loader`.
+  (Standalone `--path` mode is NOT used: its scanner treats every exported struct
+  as a table and emits phantom tables for the `Handler` types.)
+- **Multiple models:** to add a model, add it to that single `Load(...)` call —
+  one `migrate diff` then regenerates the schema for all of them.
 - Schema ownership: **Atlas owns DDL. Bun is query-only.** Never call
   `db.NewCreateTable()` / runtime DDL.
 
@@ -43,10 +47,11 @@ Full reference with diagrams: `docs/migrations-guide.md`.
    intend. A *rename* often appears as `DROP COLUMN` + `ADD COLUMN` (data loss):
    hand-edit it to `ALTER TABLE ... RENAME COLUMN`, then run `atlas migrate hash`
    to refresh `atlas.sum`.
-4. **Lint** (optional, recommended) for destructive/locking changes:
-   ```bash
-   atlas migrate lint --env bun --latest 1
-   ```
+4. **Validate / lint.** `task migrate-validate` (`atlas migrate validate`) is the
+   free, offline integrity check. `task migrate-lint`
+   (`atlas migrate lint --env bun --latest 1`) adds destructive/locking-change
+   analysis but, **since Atlas v0.38, requires `atlas login`** (free account) — so
+   use it in CI rather than assuming it runs offline.
 5. **Expose it** if the API should carry the field: update `createRequest`/
    `updateRequest` DTOs and the `Update` column set in `internal/task/`, and add
    tests.
@@ -88,6 +93,27 @@ Commit the `.sql` + updated `atlas.sum` together.
 - Directives: `-- atlas:txmode none` (e.g. `CREATE INDEX CONCURRENTLY`),
   `-- atlas:delimiter //` (functions/triggers).
 
+### Foreign keys (and any object the model can't express)
+
+The Bun provider does NOT emit FK constraints, so a foreign key is a manual
+migration (see `migrations/20260605140922_add_comments_task_fk.sql`):
+
+```sql
+ALTER TABLE "comments" ADD CONSTRAINT "comments_task_id_fkey"
+  FOREIGN KEY ("task_id") REFERENCES "tasks" ("id") ON DELETE CASCADE;
+```
+
+`migrate hash` + apply as usual. **But** the next `migrate diff` would see the FK
+as drift and try to DROP it (it's in the history, not in the model). The fix is a
+`diff.skip` policy in `atlas.hcl`'s `env` block:
+
+```hcl
+diff { skip { drop_foreign_key = true } }
+```
+
+This stops Atlas auto-dropping FKs (trade-off: removing one becomes manual too).
+Same pattern for triggers/views/etc. — add by hand, `skip` the matching drop.
+
 ## Changing a migration that's created but NOT yet applied
 
 Safe while unapplied everywhere — just keep `atlas.sum` in sync:
@@ -125,5 +151,13 @@ container starts. Never apply migrations from the app itself.
   across two releases. Additive (nullable) columns are safe immediately.
 - **Keep `loader/main.go` registering exactly the real models** — adding another
   model means adding it to the loader's `Load(...)` call.
+- **`atlas.sum` merge conflicts:** two branches each adding a migration both change
+  the directory `h1:` hash → conflict / mismatch. Resolve by keeping BOTH migration
+  files, then `atlas migrate hash` (recomputes the hash) and `atlas migrate validate`.
+  If timestamps interleave out of order, `atlas migrate rebase <version>`.
+- **dev vs target DB:** the throwaway dev DB is the `dev = ...` attribute in
+  `atlas.hcl` (Atlas resets it — never point at real data); the target is whatever
+  you pass via `-u/--url` (or `getenv` in the `deploy` env). The dev DB is only
+  needed to `diff`/`lint`/`validate`, NOT to `apply`.
 - **`updated_at` is set by the app**, not a DB trigger; migrations won't add one.
 - **Adopting an existing DB:** `atlas migrate apply --env deploy --baseline <version>`.
