@@ -25,9 +25,11 @@ tasks:
       - go run ./cmd/server
 
   migrate-diff:
-    desc: Generate a versioned migration from the Bun model (uses the dev DB on 5434 to compute the diff). Needs the dev DB up.
+    desc: Generate a versioned migration from the Bun model (uses the dev DB on 5434 to compute the diff). Needs the dev DB up. Pass a name with `task migrate-diff -- add_priority`.
     cmds:
-      - atlas migrate diff --env bun
+      # {{.CLI_ARGS}} forwards anything after `--` as the migration name.
+      # With no name, Atlas auto-generates one from a timestamp.
+      - atlas migrate diff {{.CLI_ARGS}} --env bun
 
   migrate-apply:
     desc: Apply pending migrations to the app DB on 5433.
