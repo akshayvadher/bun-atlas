@@ -1,8 +1,6 @@
 data "external_schema" "bun" {
   # Standalone mode: the provider scans ./internal/task for Bun models and
-  # prints their DDL. (Switched to program/loader mode in a later slice — see
-  # the loader/ directory — because the standalone scanner treats every exported
-  # struct as a table.)
+  # prints their DDL. (Switched to program/loader mode in a later slice.)
   program = [
     "go", "run", "-mod=mod",
     "ariga.io/atlas-provider-bun",
@@ -14,9 +12,10 @@ data "external_schema" "bun" {
 
 env "bun" {
   src = data.external_schema.bun.url
-  # Dev database Atlas resets to compute diffs. docker://... spins one up via the
-  # Docker CLI.
-  dev = "docker://postgres/15/dev?search_path=public"
+  # Dev database: a throwaway Postgres Atlas resets to compute diffs. We point
+  # at a real container (compose.yaml service "postgres-dev" on host port 5434)
+  # rather than "docker://..." because this host has podman only, no docker CLI.
+  dev = "postgres://postgres:postgres@localhost:5434/dev?sslmode=disable&search_path=public"
   migration {
     dir = "file://migrations"
   }
