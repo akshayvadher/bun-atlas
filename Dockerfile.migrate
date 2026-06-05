@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+
+# ---------------------------------------------------------------------------
+# Migration runner — intended to run as a Kubernetes init container BEFORE the
+# app container starts. It applies the pre-generated Atlas migrations against
+# the target database and then exits 0.
+#
+# It needs ONLY the atlas binary + the migrations directory + a DATABASE_URL.
+# It deliberately does NOT include Go, the Bun loader, or a dev database:
+# those are required only to GENERATE migrations (`atlas migrate diff`), never
+# to APPLY them. `atlas migrate apply` tracks applied revisions in an
+# `atlas_schema_revisions` table in the target DB, so re-running on every pod
+# start is idempotent — already-applied migrations are skipped.
+#
+# The base image's entrypoint is `atlas`; CMD appends the subcommand.
+# ---------------------------------------------------------------------------
+FROM arigaio/atlas:latest
+
+# Migration files + atlas.sum (integrity checksum — required by apply).
+COPY migrations /migrations
+
+# Apply-only config. Reads the target DB URL from the DATABASE_URL env var via
+# getenv() at runtime, so no shell expansion / arg overriding is needed —
+# just set DATABASE_URL on the container.
+COPY atlas.deploy.hcl /atlas.hcl
+
+# `atlas migrate apply --env deploy -c file:///atlas.hcl`
+CMD ["migrate", "apply", "--env", "deploy", "-c", "file:///atlas.hcl"]

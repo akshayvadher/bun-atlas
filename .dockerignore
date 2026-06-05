@@ -1,0 +1,14 @@
+# Keep the build context small. NOTE: both Dockerfile and Dockerfile.migrate
+# share this context, so anything the migration image COPYs (migrations/,
+# atlas.deploy.hcl) must NOT be ignored here.
+.git
+.claude
+docs
+*.md
+compose.yaml
+Taskfile.yml
+.dockerignore
+
+# Local dev / editor noise.
+.srv.out
+.srv.err
