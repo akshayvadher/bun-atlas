@@ -196,7 +196,64 @@ integrity check.
 
 ---
 
-## 5. What to do when a migration fails
+## 5. Manual & data migrations (INSERT, seeds, custom SQL)
+
+`atlas migrate diff` only generates **schema (DDL)** from the Bun model. For
+anything it can't derive — data seeds/backfills, or raw SQL — write the migration
+by hand:
+
+```bash
+# 1. create an empty, correctly-named and ordered migration file
+atlas migrate new seed_default_tasks --dir "file://migrations"
+#    -> migrations/<ts>_seed_default_tasks.sql  (empty)
+
+# 2. edit it: put any SQL you want, e.g.
+#    INSERT INTO "tasks" ("title","completed") VALUES ('Welcome', false);
+
+# 3. re-hash so atlas.sum matches the edit (REQUIRED — else apply fails the
+#    directory integrity check)
+atlas migrate hash --dir "file://migrations"
+```
+
+Commit the new `.sql` **and** the updated `atlas.sum` together; it then applies
+in version order like any other migration.
+
+**DML is safe; manual DDL drifts** — the one trap to know:
+
+- **Data (INSERT/UPDATE/DELETE)** — fine. It isn't schema, so the next
+  `migrate diff` ignores it. (Keep the SQL valid against the schema at that point,
+  since Atlas replays every file onto the dev DB when diffing.)
+- **A schema object the Bun model can't express** (trigger, function, view,
+  partial/expression index, CHECK constraint) — on the next `migrate diff`, Atlas
+  compares the migrations-dir state (which *has* your object) against the
+  model-derived desired state (which *doesn't*) and generates a migration that
+  **DROPS it** as drift. Mitigate: express it on the model if you can (most plain
+  indexes/uniques can be); otherwise treat it as "unmanaged" and review every
+  future diff so the auto-drop never gets committed.
+
+Useful directives at the top of a manual file:
+
+- `-- atlas:txmode none` — run outside a transaction (e.g. `CREATE INDEX CONCURRENTLY`).
+- `-- atlas:delimiter //` — custom statement delimiter (functions/triggers with internal `;`).
+
+### Changing a migration that's created but NOT yet applied
+
+Safe to edit freely — nothing has run it. The only thing to keep in sync is
+`atlas.sum`:
+
+| Goal | Command |
+| ---- | ------- |
+| Tweak the SQL by hand | edit the `.sql`, then `atlas migrate hash` — or `atlas migrate edit <version>` (opens it and re-hashes) |
+| Discard it | `atlas migrate rm <version> --dir "file://migrations"` (deletes the file *and* updates `atlas.sum`) |
+| Regenerate from a changed model | `atlas migrate rm` it, fix the model, re-run `atlas migrate diff <name>` |
+
+Then sanity-check: `atlas migrate validate` and `atlas migrate lint --env bun --latest 1`.
+
+> **Immutability boundary:** all of the above is safe *only while the migration is
+> unapplied in every shared environment*. Once it has run on staging/prod it is
+> frozen — never edit it; **fix forward** with a new migration.
+
+## 6. What to do when a migration fails
 
 Good news: **Postgres has transactional DDL**, and Atlas's default `--tx-mode
 file` wraps each migration file in a transaction. So a failed statement normally
@@ -245,7 +302,7 @@ Practical recovery steps when an apply fails in k8s:
 
 ---
 
-## 6. Gotchas — the stuff that bites in production
+## 7. Gotchas — the stuff that bites in production
 
 ```mermaid
 flowchart TD
@@ -316,7 +373,7 @@ deliberate migration (a trigger), not something Atlas derives from the struct.
 
 ---
 
-## 7. Cheat sheet
+## 8. Cheat sheet
 
 ```bash
 # --- inspect ---
@@ -328,6 +385,13 @@ task db-up                                  # dev DB must be up for diff
 task migrate-diff -- <descriptive_name>     # atlas migrate diff <name> --env bun
 atlas migrate lint --env bun --latest 1     # safety check
 atlas migrate hash                          # ONLY if you hand-edited an unshared migration
+
+# --- manual / data migration (INSERT, custom SQL) ---
+atlas migrate new <name> --dir "file://migrations"   # empty file to fill in, then `migrate hash`
+
+# --- change an UNAPPLIED migration ---
+atlas migrate edit <version>                # edit + re-hash in one step
+atlas migrate rm   <version> --dir "file://migrations"   # discard it + re-hash
 
 # --- apply (locally) ---
 task migrate-apply                          # → app DB on 5433

@@ -65,6 +65,39 @@ Full reference with diagrams: `docs/migrations-guide.md`.
 Forgetting the `.sql` causes drift; forgetting `atlas.sum` fails the integrity
 check on the next apply.
 
+## Manual & data migrations (INSERT, seeds, custom SQL)
+
+`migrate diff` only generates DDL from the model. For data or raw SQL, write a
+migration by hand:
+
+```bash
+atlas migrate new <name> --dir "file://migrations"   # empty file
+# edit it (e.g. INSERT INTO "tasks" ...)
+atlas migrate hash --dir "file://migrations"          # REQUIRED: re-sync atlas.sum
+```
+
+Commit the `.sql` + updated `atlas.sum` together.
+
+- **DML (INSERT/UPDATE/DELETE) is safe** — not schema, so the next `migrate diff`
+  ignores it. Keep it valid against the schema at that point (diff replays it on
+  the dev DB).
+- **Manual DDL the Bun model can't express** (trigger, function, view,
+  partial/expression index, CHECK) **drifts**: the next `migrate diff` will try to
+  DROP it as not-in-the-desired-state. Prefer expressing it on the model; if you
+  can't, treat it as unmanaged and review every future diff.
+- Directives: `-- atlas:txmode none` (e.g. `CREATE INDEX CONCURRENTLY`),
+  `-- atlas:delimiter //` (functions/triggers).
+
+## Changing a migration that's created but NOT yet applied
+
+Safe while unapplied everywhere — just keep `atlas.sum` in sync:
+
+- Edit by hand → `atlas migrate hash`, or `atlas migrate edit <version>` (edits + re-hashes).
+- Discard it → `atlas migrate rm <version> --dir "file://migrations"` (removes file + re-hashes).
+- Regenerate from a changed model → `atlas migrate rm` it, fix the model, `atlas migrate diff <name>`.
+
+Once a migration has run on a shared env it is immutable — fix forward instead.
+
 ## How apply works / production
 
 `atlas migrate apply` records applied versions in an `atlas_schema_revisions`
