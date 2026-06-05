@@ -25,10 +25,13 @@ Full reference with diagrams: `docs/migrations-guide.md`.
 ## Prerequisites
 
 - `atlas`, `podman`, and `go-task` (`task`) on PATH.
-- Bring the databases up first: `task db-up` starts BOTH the app DB (5433) and
-  the **dev DB (5434)**. The dev DB is required to *generate* a migration
-  (Atlas resets it to compute the diff). On podman hosts the dev DB is a real
-  container, not `docker://` (no docker CLI).
+- `task db-up` starts the **app DB (5433)**. Atlas's **dev DB is ephemeral**:
+  `atlas.hcl` uses `dev = "docker://postgres/15/dev"`, so Atlas spins a temporary
+  Postgres per `diff`/`validate`/`lint` and destroys it. `docker://` uses the
+  Docker API, so on podman the Taskfile sets `DOCKER_HOST` (defaulting to
+  `unix:///run/podman/podman.sock`) on those tasks — a shell `alias docker=podman`
+  does NOT work. If the socket isn't reachable, fall back to a dedicated dev
+  container (see the migrations guide); then point `dev` at it and drop DOCKER_HOST.
 
 ## Procedure — change the schema (e.g. add a column)
 
@@ -37,7 +40,8 @@ Full reference with diagrams: `docs/migrations-guide.md`.
    (e.g. `DueDate *time.Time \`bun:"due_date,nullzero"\``). For NOT NULL on a
    table that may already have rows, give a default
    (e.g. `bun:"priority,notnull,default:0"`) — otherwise apply fails on existing data.
-2. **Generate the migration** (dev DB must be up). Pass a descriptive name:
+2. **Generate the migration** (uses the ephemeral dev DB; run via `task` so
+   `DOCKER_HOST` is set). Pass a descriptive name:
    ```bash
    task migrate-diff -- add_due_date_to_tasks
    # = atlas migrate diff add_due_date_to_tasks --env bun
@@ -156,8 +160,9 @@ container starts. Never apply migrations from the app itself.
   files, then `atlas migrate hash` (recomputes the hash) and `atlas migrate validate`.
   If timestamps interleave out of order, `atlas migrate rebase <version>`.
 - **dev vs target DB:** the throwaway dev DB is the `dev = ...` attribute in
-  `atlas.hcl` (Atlas resets it — never point at real data); the target is whatever
-  you pass via `-u/--url` (or `getenv` in the `deploy` env). The dev DB is only
-  needed to `diff`/`lint`/`validate`, NOT to `apply`.
+  `atlas.hcl` (here ephemeral `docker://`; Atlas resets it — never point at real
+  data); the target is whatever you pass via `-u/--url` (or `getenv` in the
+  `deploy` env). The dev DB is only needed to `diff`/`lint`/`validate`, NOT to
+  `apply` (which is why the init container ships no dev DB and no DOCKER_HOST).
 - **`updated_at` is set by the app**, not a DB trigger; migrations won't add one.
 - **Adopting an existing DB:** `atlas migrate apply --env deploy --baseline <version>`.

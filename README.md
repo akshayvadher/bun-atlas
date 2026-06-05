@@ -59,8 +59,8 @@ stmts, err := bunschema.New(bunschema.DialectPostgres).Load(&task.Task{})
 
 ```
 ba/
-├── atlas.hcl            # Atlas env "bun": external_schema runs ./loader; dev = Postgres on 5434
-├── compose.yaml         # Two Postgres 15 services: app DB (5433) + Atlas dev DB (5434)
+├── atlas.hcl            # Atlas env "bun": external_schema runs ./loader; dev = ephemeral docker:// (podman)
+├── compose.yaml         # One Postgres 15 service: app DB (5433). Dev DB is ephemeral.
 ├── Taskfile.yml         # go-task: db-up, db-down, run, migrate-diff, migrate-apply, migrate-status
 ├── loader/main.go       # Atlas provider in program mode: registers ALL models (Task, Comment)
 ├── go.mod / go.sum
@@ -109,32 +109,39 @@ violation). Full write-up in [`docs/migrations-guide.md`](docs/migrations-guide.
 Host port **5433** (mapped to the container's 5432) is intentional so it never
 clashes with a Postgres already running on the default 5432.
 
-### Two databases: app DB vs. Atlas dev DB
+### Two databases: app DB and Atlas's (ephemeral) dev DB
 
-`compose.yaml` starts **two** Postgres containers:
+There are two databases, but `compose.yaml` only runs one:
 
-| Service        | Host port | Role                                                                                                |
-| -------------- | --------- | --------------------------------------------------------------------------------------------------- |
-| `postgres`     | **5433**  | **App database.** Migrations are applied here; the server connects here. Data persists in a volume. |
-| `postgres-dev` | **5434**  | **Atlas dev (scratch) database.** Atlas resets it on every `migrate diff` to compute the schema diff. Holds no app data (tmpfs). |
+| Database            | How it runs                          | Role                                                                                 |
+| ------------------- | ------------------------------------ | ------------------------------------------------------------------------------------ |
+| **App** (5433)      | `compose.yaml` service `postgres`    | Migrations are applied here; the server connects here. Data persists in a volume.    |
+| **Atlas dev**       | **ephemeral** `docker://` per `diff` | A throwaway Atlas resets/destroys each run to compute the schema diff. No app data.  |
 
-Atlas needs a throwaway "dev" database to normalize and diff schemas. The usual
-`dev = "docker://postgres/15/dev"` in `atlas.hcl` spins one up via the **Docker
-CLI** — but this project targets **podman**, which has no `docker` binary. So
-`atlas.hcl` instead points `dev` at the real `postgres-dev` container:
+`atlas.hcl` uses `dev = "docker://postgres/15/dev"` — Atlas spins a temporary
+Postgres per `diff`/`validate`/`lint` and discards it, so there's no second
+container to manage. The catch: `docker://` talks to the **Docker API**, and this
+project targets **podman**. A shell `alias docker=podman` does **not** help
+(aliases aren't inherited by Atlas, and it uses the API, not the CLI). The fix is
+`DOCKER_HOST` → podman's Docker-compatible socket; the Taskfile sets it for you on
+`migrate-diff`/`migrate-validate`/`migrate-lint`:
 
-```hcl
-dev = "postgres://postgres:postgres@localhost:5434/dev?sslmode=disable&search_path=public"
+```sh
+DOCKER_HOST=${DOCKER_HOST:-unix:///run/podman/podman.sock}   # find yours: podman info --format '{{.Host.RemoteSocket.Path}}'
 ```
 
-`task db-up` (i.e. `podman compose up -d`) brings up **both** DBs. You need the
-**dev DB (5434) up to run `migrate diff`**, and the **app DB (5433) up to run
-`migrate apply`**.
+If that doesn't work in your environment (no socket, native-Windows pipe, etc.),
+the [migrations guide](docs/migrations-guide.md) shows a one-paragraph fallback:
+add a dedicated `postgres-dev` container and point `dev` at it.
+
+So `task db-up` brings up only the **app DB (5433)**; the dev DB appears and
+disappears on each `migrate diff`.
 
 ## Prerequisites
 
 - Go 1.26.4
-- [podman](https://podman.io) (or Docker) for Postgres + the Atlas dev database
+- [podman](https://podman.io) (or Docker) — runs the app Postgres and backs
+  Atlas's ephemeral dev DB (for podman, ensure the socket is reachable; see above)
 - [Atlas CLI](https://atlasgo.io/getting-started#installation)
 - [go-task](https://taskfile.dev) (optional; commands also work standalone)
 
@@ -143,8 +150,8 @@ dev = "postgres://postgres:postgres@localhost:5434/dev?sslmode=disable&search_pa
 Using go-task:
 
 ```powershell
-task db-up          # start BOTH Postgres containers (app DB 5433 + dev DB 5434)
-task migrate-diff   # generate a migration from the Bun model (uses dev DB 5434)
+task db-up          # start the app Postgres (5433); dev DB is ephemeral
+task migrate-diff   # generate a migration from the Bun models (ephemeral dev DB)
 task migrate-apply  # apply migrations to the app DB (5433)
 task migrate-status # show applied/pending migrations on the app DB
 task run            # start the HTTP server
@@ -286,9 +293,9 @@ This is the loop the demo teaches:
 
 1. **Edit the model.** Change the Bun `Task` struct in `internal/task/model.go`.
 2. **Diff.** `atlas migrate diff --env bun` — Atlas loads the model via the
-   `./loader` program, compares it against the **dev database** (`postgres-dev`
-   on 5434, which Atlas resets), and writes a new timestamped SQL migration plus
-   `atlas.sum` into `migrations/`.
+   `./loader` program, compares it against an **ephemeral dev database** (spun up
+   via `docker://` on podman, which Atlas resets), and writes a new timestamped
+   SQL migration plus `atlas.sum` into `migrations/`.
 3. **Apply.** `atlas migrate apply --env bun -u "$DATABASE_URL"` — applies any
    pending migrations to the **app database** (5433).
 4. **Run.** `go run ./cmd/server` — the app queries the now-current schema with
@@ -352,7 +359,7 @@ value maps to SQL `NULL`).
 1. Runs `./loader`, which prints the *desired* schema (the `tasks` table now
    including `due_date`).
 2. Replays the **existing** migrations (`20260605103003.sql`) onto the scratch
-   **dev database** (`postgres-dev`, 5434) to reconstruct the *current* schema.
+   **ephemeral dev database** to reconstruct the *current* schema.
 3. Diffs desired vs. current and writes only the delta as a new timestamped
    migration — leaving the first migration and its `atlas.sum` hash untouched.
 

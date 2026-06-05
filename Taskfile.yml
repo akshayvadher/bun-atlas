@@ -10,12 +10,12 @@ env:
 
 tasks:
   db-up:
-    desc: Start BOTH Postgres containers — app DB (5433) and Atlas dev DB (5434).
+    desc: Start the app Postgres (5433). Atlas's dev DB is spun up ephemerally per diff — no separate container.
     cmds:
       - podman compose up -d
 
   db-down:
-    desc: Stop and remove both Postgres containers.
+    desc: Stop and remove the app Postgres container.
     cmds:
       - podman compose down
 
@@ -25,7 +25,14 @@ tasks:
       - go run ./cmd/server
 
   migrate-diff:
-    desc: Generate a versioned migration from the Bun model (uses the dev DB on 5434 to compute the diff). Needs the dev DB up. Pass a name with `task migrate-diff -- add_priority`.
+    desc: Generate a versioned migration from the Bun models. Atlas spins an ephemeral dev DB via podman to compute the diff. Pass a name with `task migrate-diff -- add_priority`.
+    env:
+      # Atlas's docker:// dev DB talks to the Docker API. Point it at podman's
+      # Docker-compatible socket. Respects an already-set DOCKER_HOST (e.g. a
+      # podman-machine pipe on Windows/macOS) and otherwise defaults to the
+      # common rootful Linux path.
+      DOCKER_HOST:
+        sh: echo "${DOCKER_HOST:-unix:///run/podman/podman.sock}"
     cmds:
       # {{.CLI_ARGS}} forwards anything after `--` as the migration name.
       # With no name, Atlas auto-generates one from a timestamp.
@@ -42,12 +49,18 @@ tasks:
       - atlas migrate status --env bun -u "$DATABASE_URL"
 
   migrate-validate:
-    desc: Validate migration directory integrity (atlas.sum + replayable SQL). Runs offline; needs the dev DB on 5434 up.
+    desc: Validate migration directory integrity (atlas.sum + replayable SQL). Uses the ephemeral podman dev DB.
+    env:
+      DOCKER_HOST:
+        sh: echo "${DOCKER_HOST:-unix:///run/podman/podman.sock}"
     cmds:
       - atlas migrate validate --env bun
 
   migrate-lint:
-    desc: "Lint the latest migration for destructive/unsafe changes. NOTE: since Atlas v0.38 this requires `atlas login` (free). Needs the dev DB up."
+    desc: "Lint the latest migration for destructive/unsafe changes. NOTE: since Atlas v0.38 this requires `atlas login` (free). Uses the ephemeral podman dev DB."
+    env:
+      DOCKER_HOST:
+        sh: echo "${DOCKER_HOST:-unix:///run/podman/podman.sock}"
     cmds:
       - atlas migrate lint --env bun --latest 1
 

@@ -12,10 +12,16 @@ data "external_schema" "bun" {
 
 env "bun" {
   src = data.external_schema.bun.url
-  # Dev database: a throwaway Postgres Atlas resets to compute diffs. We point
-  # at a real container (compose.yaml service "postgres-dev" on host port 5434)
-  # rather than "docker://..." because this host has podman only, no docker CLI.
-  dev = "postgres://postgres:postgres@localhost:5434/dev?sslmode=disable&search_path=public"
+  # Dev database: a throwaway Postgres Atlas resets to compute diffs. We use the
+  # EPHEMERAL docker:// driver — Atlas spins a temporary container per run and
+  # destroys it afterwards. It talks to the Docker *API* (not the `docker` CLI),
+  # so with podman you set DOCKER_HOST to podman's Docker-compatible socket; the
+  # Taskfile does this for the diff/validate/lint tasks.
+  #
+  # Stuck (no socket / native-Windows pipe / using real Docker)? See "Which
+  # database is which" in docs/migrations-guide.md for the dedicated-container
+  # fallback (a second compose service on a fixed port).
+  dev = "docker://postgres/15/dev?search_path=public"
   migration {
     dir = "file://migrations"
   }

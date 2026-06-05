@@ -6,8 +6,9 @@ failed migration, and the gotchas worth knowing before you hit them.
 
 This complements the [README](../README.md) (which covers the local dev loop and
 deployment). Everything here is grounded in *this* project: `internal/task/model.go`
-is the source of truth, Atlas runs in **loader mode** against a podman dev DB on
-port 5434, and migrations are applied in production by a dedicated init container.
+is the source of truth, Atlas runs in **loader mode** with an **ephemeral podman
+dev DB** (spun up per `diff`), and migrations are applied in production by a
+dedicated init container.
 
 ---
 
@@ -34,7 +35,7 @@ Two distinct phases, run by two different actors at two different times:
 
 | Phase        | Command              | Who runs it          | When                    | Needs                          |
 | ------------ | -------------------- | -------------------- | ----------------------- | ------------------------------ |
-| **Generate** | `atlas migrate diff` | you, a developer     | dev time, your machine  | dev DB (5434) + the Go loader  |
+| **Generate** | `atlas migrate diff` | you, a developer     | dev time, your machine  | an ephemeral dev DB + the Go loader |
 | **Apply**    | `atlas migrate apply`| migration init container | deploy time, in k8s | only the target DB URL         |
 
 This split is why there are two Docker images. The app image never touches schema.
@@ -45,7 +46,7 @@ This split is why there are two Docker images. The app image never touches schem
 
 When you change the struct and run `atlas migrate diff`, Atlas needs to answer:
 *"what SQL turns the current schema into the desired schema?"* It computes this
-using the **dev database (5434) as a scratch pad** — never your real data.
+using a **throwaway dev database as a scratch pad** — never your real data.
 
 ```mermaid
 sequenceDiagram
@@ -53,7 +54,7 @@ sequenceDiagram
     participant You as You (edited model.go)
     participant Atlas as atlas migrate diff
     participant Loader as go run ./loader
-    participant DevDB as Dev DB (5434, scratch)
+    participant DevDB as Dev DB (ephemeral, scratch)
     participant Dir as migrations/ + atlas.sum
 
     You->>Atlas: atlas migrate diff add_priority --env bun
@@ -73,8 +74,8 @@ sequenceDiagram
 
 The key insight: Atlas knows the "current" state by **replaying your committed
 migration files** onto the throwaway dev DB, not by inspecting production. That's
-why the dev DB must be up for `diff`, and why it can be empty/scratch — it gets
-reset every time.
+why a dev DB is needed for `diff`, and why it can be empty/scratch — Atlas resets
+(or recreates) it every time.
 
 > **This is exactly why the loader-mode bug happened during the build.** In
 > standalone mode, the loader emitted DDL for *every* exported struct (including
@@ -86,10 +87,10 @@ reset every time.
 Nothing magic marks one database as "real" and another as "throwaway" — it's the
 **role you give it in `atlas.hcl`**:
 
-- `dev = "postgres://…@localhost:5434/dev…"` — the **dev/scratch** database. Atlas
-  **resets it** on every `diff`/`lint`/`validate` to normalise and compute
-  schemas, so it must be disposable, with no data you care about. **Never point
-  `dev` at your app/prod database.**
+- `dev = "docker://postgres/15/dev?search_path=public"` — the **dev/scratch**
+  database. Atlas **resets/recreates it** on every `diff`/`lint`/`validate` to
+  normalise and compute schemas, so it must be disposable, with no data you care
+  about. **Never point `dev` at your app/prod database.**
 - The **target** (the DB you actually change) is **not** in `atlas.hcl` by
   default; you pass it at apply time with `-u/--url` (e.g. `task migrate-apply`
   uses `-u "$DATABASE_URL"` → 5433), or — for the init container — the `deploy`
@@ -101,11 +102,44 @@ is scratch; `--url`/`getenv` is the database receiving the migrations.
 **Do you always need a dev DB?** Only to **generate or analyse** migrations
 (`diff`, `lint`, `validate` — they build schemas in a clean DB). You do **not**
 need it to **apply** — `migrate apply` only touches the target DB, which is why
-the production init container ships no dev DB. The dev DB also needn't be a
-long-running container: `dev = "docker://postgres/15/dev"` makes Atlas spin up an
-ephemeral one per run (needs the Docker CLI); we use a podman container on 5434
-because this host has no docker. (SQLite users can even use
-`dev = "sqlite://file?mode=memory"`.)
+the production init container ships no dev DB.
+
+**This repo uses the ephemeral `docker://` dev DB.** `dev = "docker://postgres/15/dev"`
+makes Atlas spin up a temporary Postgres per run and destroy it after — no second
+container to manage. The catch: `docker://` talks to the **Docker API**, and this
+host runs **podman**. A shell `alias docker=podman` does *not* help (aliases
+aren't inherited by Atlas, and it uses the API, not the CLI). What works is
+pointing `DOCKER_HOST` at podman's Docker-compatible socket — the Taskfile's
+`migrate-diff`/`migrate-validate`/`migrate-lint` tasks set:
+
+```
+DOCKER_HOST = ${DOCKER_HOST:-unix:///run/podman/podman.sock}
+```
+
+(get yours from `podman info --format '{{.Host.RemoteSocket.Path}}'`; on a podman
+machine / Windows / macOS it's a different path or pipe — set `DOCKER_HOST` in
+your shell and the tasks will respect it).
+
+**Fallback — a dedicated dev container (if `docker://` won't work for you):** no
+Docker socket, a native-Windows pipe you can't reach, or you'd just rather run a
+plain container. Add a second service to `compose.yaml` and point `dev` at it:
+
+```yaml
+# compose.yaml
+  postgres-dev:
+    image: postgres:15
+    environment: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: dev }
+    ports: ["5434:5432"]
+    tmpfs: ["/var/lib/postgresql/data"]   # scratch; nothing needs to survive
+```
+
+```hcl
+# atlas.hcl — replace the docker:// dev line with:
+dev = "postgres://postgres:postgres@localhost:5434/dev?sslmode=disable&search_path=public"
+```
+
+Then `migrate diff` needs that container up (and no `DOCKER_HOST`). SQLite users
+have an even simpler option: `dev = "sqlite://file?mode=memory"`.
 
 ---
 
@@ -170,7 +204,7 @@ Concrete example — add a `priority int` to tasks.
 ```mermaid
 flowchart TD
     S(["Need a new column: priority"]) --> E["1 Edit internal/task/model.go<br/>Priority int bun:'priority,notnull,default:0'"]
-    E --> U["2 Ensure dev DB is up:  task db-up"]
+    E --> U["2 Ensure the app DB is up:  task db-up<br/>(dev DB is ephemeral — Atlas spins it per run)"]
     U --> D["3 Generate migration:<br/>atlas migrate diff add_priority_to_tasks --env bun"]
     D --> R{"4 Review the generated SQL<br/>migrations/2026..._add_priority_to_tasks.sql"}
     R -->|wrong / surprising| E
@@ -186,7 +220,7 @@ flowchart TD
 
 ```bash
 # 1. edit model.go (add the field) — then:
-task db-up                                              # dev DB (5434) must be running
+task db-up                                              # app DB up; Atlas spins the dev DB per run
 
 # 2. generate — pass a NAME so the file is self-describing.
 #    With the Taskfile tweak you can forward the name:
@@ -493,7 +527,7 @@ task migrate-status                         # what's applied to the app DB
 atlas migrate status --env bun -u "$DATABASE_URL"
 
 # --- evolve the schema (dev time) ---
-task db-up                                  # dev DB must be up for diff
+task db-up                                  # app DB; Atlas spins an ephemeral dev DB per diff
 task migrate-diff -- <descriptive_name>     # atlas migrate diff <name> --env bun
 task migrate-validate                       # integrity check (free, offline)
 task migrate-lint                           # destructive-change analysis (needs `atlas login` since v0.38)
