@@ -1,0 +1,26 @@
+# Postgres for the Atlas + Bun CRUD demo. Podman-compatible (works with
+# `podman compose up` and `docker compose up`).
+#
+# Host port 5433 (mapped to the container's 5432) is intentional: it avoids
+# clashing with a default local Postgres on 5432. Credentials/db name match the
+# default DATABASE_URL:
+#   postgres://postgres:postgres@localhost:5433/tasks?sslmode=disable
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tasks
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tasks"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

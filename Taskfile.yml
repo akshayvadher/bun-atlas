@@ -1,0 +1,40 @@
+# go-task / taskfile.dev runner. Run `task --list` to see every command.
+#
+# NOTE: "task" here means the go-task runner, NOT the Task domain entity this
+# demo manages. The CRUD entity is unrelated to this file's tasks.
+version: "3"
+
+env:
+  # Default local connection — matches compose.yaml (Postgres on host port 5433).
+  DATABASE_URL: postgres://postgres:postgres@localhost:5433/tasks?sslmode=disable
+
+tasks:
+  db-up:
+    desc: Start the Postgres container (app DB on host port 5433).
+    cmds:
+      - podman compose up -d
+
+  db-down:
+    desc: Stop and remove the Postgres container.
+    cmds:
+      - podman compose down
+
+  run:
+    desc: Run the HTTP server (reads PORT and DATABASE_URL from the environment).
+    cmds:
+      - go run ./cmd/server
+
+  migrate-diff:
+    desc: Generate a versioned migration from the Bun model (uses a dev DB to compute the diff).
+    cmds:
+      - atlas migrate diff --env bun
+
+  migrate-apply:
+    desc: Apply pending migrations to the app DB on 5433.
+    cmds:
+      - atlas migrate apply --env bun -u "$DATABASE_URL"
+
+  migrate-status:
+    desc: Show which migrations have been applied to the app DB on 5433.
+    cmds:
+      - atlas migrate status --env bun -u "$DATABASE_URL"
