@@ -72,7 +72,7 @@ func (s *bunStore) Update(ctx context.Context, t *Task) (*Task, error) {
 	t.UpdatedAt = time.Now()
 	res, err := s.db.NewUpdate().
 		Model(t).
-		Column("title", "description", "completed", "updated_at").
+		Column("title", "description", "completed", "due_date", "updated_at").
 		WherePK().
 		Returning("*").
 		Exec(ctx)

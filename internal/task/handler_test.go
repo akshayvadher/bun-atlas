@@ -245,6 +245,81 @@ func TestCreateAcceptsOptionalDescription(t *testing.T) {
 	}
 }
 
+func TestCreateAcceptsDueDateAndReturnsIt(t *testing.T) {
+	srv := newTestServer(newFakeStore())
+
+	rec := do(t, srv, http.MethodPost, "/tasks", `{"title":"buy milk","due_date":"2026-07-01T09:00:00Z"}`)
+	got := decodeTask(t, rec)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	if got.DueDate == nil {
+		t.Fatal("expected due_date to be present in the response")
+	}
+	want := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
+	if !got.DueDate.Equal(want) {
+		t.Errorf("expected due_date %v, got %v", want, *got.DueDate)
+	}
+}
+
+func TestCreateWithoutDueDateReturnsNullDueDateAnd201(t *testing.T) {
+	srv := newTestServer(newFakeStore())
+
+	rec := do(t, srv, http.MethodPost, "/tasks", `{"title":"buy milk"}`)
+	got := decodeTask(t, rec)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	if got.DueDate != nil {
+		t.Errorf("expected due_date to be null when omitted, got %v", *got.DueDate)
+	}
+}
+
+func TestUpdateSetsDueDateAndReturnsIt(t *testing.T) {
+	store := newFakeStore()
+	seeded := seedTask(t, store, "buy milk")
+	srv := newTestServer(store)
+
+	rec := do(t, srv, http.MethodPut, "/tasks/"+itoa(seeded.ID), `{"title":"buy milk","due_date":"2026-07-01T09:00:00Z"}`)
+	got := decodeTask(t, rec)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	if got.DueDate == nil {
+		t.Fatal("expected due_date to be present in the response")
+	}
+	want := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
+	if !got.DueDate.Equal(want) {
+		t.Errorf("expected due_date %v, got %v", want, *got.DueDate)
+	}
+}
+
+// The update handler binds a full updateRequest and passes its DueDate straight
+// through, so an absent due_date decodes to nil and the update clears it. This
+// documents the actual full-replace semantics rather than assuming a merge.
+func TestUpdateClearsDueDateWhenOmitted(t *testing.T) {
+	store := newFakeStore()
+	due := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
+	created, err := store.Create(context.Background(), &Task{Title: "buy milk", DueDate: &due})
+	if err != nil {
+		t.Fatalf("seed task with due_date: %v", err)
+	}
+	srv := newTestServer(store)
+
+	rec := do(t, srv, http.MethodPut, "/tasks/"+itoa(created.ID), `{"title":"buy milk"}`)
+	got := decodeTask(t, rec)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (body=%q)", rec.Code, rec.Body.String())
+	}
+	if got.DueDate != nil {
+		t.Errorf("expected due_date to be cleared when omitted from the update body, got %v", *got.DueDate)
+	}
+}
+
 // --- AC3: GET list ---
 
 func TestListReturns200(t *testing.T) {

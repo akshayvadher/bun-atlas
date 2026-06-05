@@ -1,12 +1,13 @@
 data "external_schema" "bun" {
-  # Standalone mode: the provider scans ./internal/task for Bun models and
-  # prints their DDL. (Switched to program/loader mode in a later slice.)
+  # Program mode: ./loader registers exactly the Task model and prints its DDL.
+  # We use program mode instead of standalone `load --path ./internal/task`
+  # because the standalone scanner (atlas-provider-bun v0.0.3) treats EVERY
+  # exported struct in the package as a table — it would emit a phantom
+  # "handlers" table for the exported Handler type. Listing the model
+  # explicitly in ./loader keeps the diff limited to the real source of truth.
   program = [
     "go", "run", "-mod=mod",
-    "ariga.io/atlas-provider-bun",
-    "load",
-    "--path", "./internal/task",
-    "--dialect", "postgres",
+    "./loader",
   ]
 }
 

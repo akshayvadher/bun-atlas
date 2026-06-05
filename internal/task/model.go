@@ -12,10 +12,11 @@ import (
 type Task struct {
 	bun.BaseModel `bun:"table:tasks"`
 
-	ID          int64     `bun:"id,pk,autoincrement" json:"id"`
-	Title       string    `bun:"title,notnull" json:"title"`
-	Description *string   `bun:"description" json:"description"`
-	Completed   bool      `bun:"completed,notnull,default:false" json:"completed"`
-	CreatedAt   time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	UpdatedAt   time.Time `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	ID          int64      `bun:"id,pk,autoincrement" json:"id"`
+	Title       string     `bun:"title,notnull" json:"title"`
+	Description *string    `bun:"description" json:"description"`
+	Completed   bool       `bun:"completed,notnull,default:false" json:"completed"`
+	DueDate     *time.Time `bun:"due_date,nullzero" json:"due_date"`
+	CreatedAt   time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt   time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -36,15 +37,17 @@ func RegisterRoutes(r chi.Router, store TaskStore) {
 // createRequest is the accepted body for POST /tasks. Binding a DTO (rather than
 // the model) keeps client input from setting id or timestamps.
 type createRequest struct {
-	Title       string  `json:"title"`
-	Description *string `json:"description"`
+	Title       string     `json:"title"`
+	Description *string    `json:"description"`
+	DueDate     *time.Time `json:"due_date"`
 }
 
 // updateRequest is the accepted body for PUT /tasks/{id}.
 type updateRequest struct {
-	Title       string  `json:"title"`
-	Description *string `json:"description"`
-	Completed   bool    `json:"completed"`
+	Title       string     `json:"title"`
+	Description *string    `json:"description"`
+	Completed   bool       `json:"completed"`
+	DueDate     *time.Time `json:"due_date"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +63,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	created, err := h.store.Create(r.Context(), &Task{
 		Title:       req.Title,
 		Description: req.Description,
+		DueDate:     req.DueDate,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -108,6 +112,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		Title:       req.Title,
 		Description: req.Description,
 		Completed:   req.Completed,
+		DueDate:     req.DueDate,
 	})
 	if respondStoreError(w, err) {
 		return

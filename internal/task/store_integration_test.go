@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // newStoreOnTx opens the test database, begins a transaction, and returns the
@@ -169,6 +170,54 @@ func TestStoreUpdateChangesColumnsAndAdvancesUpdatedAt(t *testing.T) {
 	}
 	if reloaded.Title != "buy oat milk" {
 		t.Errorf("expected persisted title %q, got %q", "buy oat milk", reloaded.Title)
+	}
+}
+
+func TestStoreCreatePersistsDueDate(t *testing.T) {
+	store, ctx, cleanup := newStoreOnTx(t)
+	defer cleanup()
+
+	due := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
+	created, err := store.Create(ctx, &Task{Title: "buy milk", DueDate: &due})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	reloaded, err := store.GetByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("reload after create: %v", err)
+	}
+	if reloaded.DueDate == nil {
+		t.Fatal("expected due_date to persist, got NULL")
+	}
+	if !reloaded.DueDate.Equal(due) {
+		t.Errorf("expected persisted due_date %v, got %v", due, *reloaded.DueDate)
+	}
+}
+
+func TestStoreUpdateChangesDueDate(t *testing.T) {
+	store, ctx, cleanup := newStoreOnTx(t)
+	defer cleanup()
+
+	created, err := store.Create(ctx, &Task{Title: "buy milk"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	due := time.Date(2026, 8, 15, 17, 30, 0, 0, time.UTC)
+	if _, err := store.Update(ctx, &Task{ID: created.ID, Title: "buy milk", DueDate: &due}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	reloaded, err := store.GetByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("reload after update: %v", err)
+	}
+	if reloaded.DueDate == nil {
+		t.Fatal("expected due_date to be set after update, got NULL")
+	}
+	if !reloaded.DueDate.Equal(due) {
+		t.Errorf("expected persisted due_date %v, got %v", due, *reloaded.DueDate)
 	}
 }
 
