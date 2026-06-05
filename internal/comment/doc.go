@@ -4,9 +4,9 @@
 // It exists to show the MULTIPLE-MODELS workflow: loader/main.go registers
 // Comment alongside Task, so a single `atlas migrate diff` generates both tables.
 //
-// task_id is a plain referencing column, not a DB-level foreign key: the Bun
-// provider doesn't emit FK constraints from relations, and a hand-added FK would
-// drift on the next diff (see "Manual & data migrations" in the migrations
-// guide). The relationship is enforced in the application — posting a comment to
-// a missing task returns 404.
+// The comments.task_id -> tasks.id foreign key is added by a MANUAL migration
+// (the Bun provider doesn't emit FK constraints), with a diff.skip policy in
+// atlas.hcl so Atlas doesn't treat it as drift — see "Manual & data migrations"
+// in the migrations guide. The handler also pre-checks the task exists, so a
+// comment on a missing task returns a clean 404 rather than a raw FK violation.
 package comment

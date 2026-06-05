@@ -8,7 +8,8 @@
 //     database is reachable.
 //
 // Each test runs inside a transaction that is rolled back, so the app DB is left
-// untouched.
+// untouched. Comments have a foreign key to tasks (added by a manual migration),
+// so each test seeds a real task row first.
 //
 // Run with, e.g.:
 //
@@ -29,7 +30,7 @@ import (
 	"github.com/uptrace/bun/driver/pgdriver"
 )
 
-func newStoreOnTx(t *testing.T) (CommentStore, context.Context, func()) {
+func newStoreOnTx(t *testing.T) (CommentStore, bun.IDB, context.Context, func()) {
 	t.Helper()
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -59,14 +60,26 @@ func newStoreOnTx(t *testing.T) (CommentStore, context.Context, func()) {
 		_ = tx.Rollback()
 		_ = db.Close()
 	}
-	return NewStore(tx), context.Background(), cleanup
+	return NewStore(tx), tx, context.Background(), cleanup
+}
+
+// seedTask inserts a real tasks row inside the test transaction and returns its
+// id, so comments can satisfy the comments.task_id -> tasks.id foreign key.
+func seedTask(t *testing.T, tx bun.IDB, ctx context.Context, title string) int64 {
+	t.Helper()
+	var id int64
+	if err := tx.NewRaw(`INSERT INTO tasks (title) VALUES (?) RETURNING id`, title).Scan(ctx, &id); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	return id
 }
 
 func TestStoreCreatePersistsComment(t *testing.T) {
-	store, ctx, cleanup := newStoreOnTx(t)
+	store, tx, ctx, cleanup := newStoreOnTx(t)
 	defer cleanup()
 
-	created, err := store.Create(ctx, &Comment{TaskID: 1, Body: "nice work"})
+	taskID := seedTask(t, tx, ctx, "parent task")
+	created, err := store.Create(ctx, &Comment{TaskID: taskID, Body: "nice work"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -77,27 +90,21 @@ func TestStoreCreatePersistsComment(t *testing.T) {
 		t.Error("expected timestamps populated by schema defaults")
 	}
 
-	list, err := store.ListByTask(ctx, 1)
+	list, err := store.ListByTask(ctx, taskID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	found := false
-	for _, c := range list {
-		if c.ID == created.ID && c.Body == "nice work" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected the created comment to be listed for its task")
+	if len(list) != 1 || list[0].ID != created.ID || list[0].Body != "nice work" {
+		t.Errorf("expected the created comment to be listed for its task, got %+v", list)
 	}
 }
 
 func TestStoreListByTaskFiltersByTask(t *testing.T) {
-	store, ctx, cleanup := newStoreOnTx(t)
+	store, tx, ctx, cleanup := newStoreOnTx(t)
 	defer cleanup()
 
-	// Use a high, unique task id so the assertion is independent of other rows.
-	const taskA, taskB int64 = 990001, 990002
+	taskA := seedTask(t, tx, ctx, "task A")
+	taskB := seedTask(t, tx, ctx, "task B")
 	if _, err := store.Create(ctx, &Comment{TaskID: taskA, Body: "a1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,10 +128,11 @@ func TestStoreListByTaskFiltersByTask(t *testing.T) {
 }
 
 func TestStoreDeleteRemovesComment(t *testing.T) {
-	store, ctx, cleanup := newStoreOnTx(t)
+	store, tx, ctx, cleanup := newStoreOnTx(t)
 	defer cleanup()
 
-	created, err := store.Create(ctx, &Comment{TaskID: 1, Body: "delete me"})
+	taskID := seedTask(t, tx, ctx, "parent task")
+	created, err := store.Create(ctx, &Comment{TaskID: taskID, Body: "delete me"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -137,7 +145,7 @@ func TestStoreDeleteRemovesComment(t *testing.T) {
 }
 
 func TestStoreDeleteReturnsErrNotFoundForMissing(t *testing.T) {
-	store, ctx, cleanup := newStoreOnTx(t)
+	store, _, ctx, cleanup := newStoreOnTx(t)
 	defer cleanup()
 
 	if err := store.Delete(ctx, 999999999); !errors.Is(err, ErrNotFound) {

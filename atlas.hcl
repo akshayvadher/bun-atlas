@@ -1,10 +1,9 @@
 data "external_schema" "bun" {
-  # Program mode: ./loader registers exactly the Task model and prints its DDL.
-  # We use program mode instead of standalone `load --path ./internal/task`
-  # because the standalone scanner (atlas-provider-bun v0.0.3) treats EVERY
-  # exported struct in the package as a table — it would emit a phantom
-  # "handlers" table for the exported Handler type. Listing the model
-  # explicitly in ./loader keeps the diff limited to the real source of truth.
+  # Program mode: ./loader registers every Bun model (Task, Comment) and prints
+  # their DDL. We use program mode instead of standalone `load --path` because
+  # the standalone scanner treats EVERY exported struct in a package as a table
+  # (it would emit phantom tables for the Handler types). Listing models
+  # explicitly in ./loader keeps the diff limited to the real sources of truth.
   program = [
     "go", "run", "-mod=mod",
     "./loader",
@@ -23,6 +22,18 @@ env "bun" {
   format {
     migrate {
       diff = "{{ sql . \"  \" }}"
+    }
+  }
+  # The Bun provider can't express foreign keys, so the comments.task_id FK is
+  # added by a MANUAL migration (20260605140922_add_comments_task_fk.sql). Without
+  # this policy, every subsequent `migrate diff` would see the FK as drift (it's
+  # in the migration history but not in the model-derived desired state) and try
+  # to DROP it. Skipping drop_foreign_key tells Atlas not to auto-generate FK
+  # drops — so the hand-managed FK survives. Trade-off: removing an FK is then
+  # also a manual migration.
+  diff {
+    skip {
+      drop_foreign_key = true
     }
   }
 }

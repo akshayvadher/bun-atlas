@@ -96,8 +96,9 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // requireTask parses {taskID} and 404s when the task does not exist, so a
-// comment can't be attached to a missing task (the relationship is enforced by
-// the app, since task_id is not a DB-level foreign key).
+// comment on a missing task returns a clean 404 instead of a raw foreign-key
+// violation from the DB (there IS a comments.task_id -> tasks.id FK, added by a
+// manual migration; this check just gives a nicer error).
 func (h *Handler) requireTask(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	taskID, err := strconv.ParseInt(chi.URLParam(r, "taskID"), 10, 64)
 	if err != nil {
