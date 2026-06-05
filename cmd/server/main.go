@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"ba/internal/comment"
 	"ba/internal/db"
 	"ba/internal/task"
 )
@@ -27,13 +29,33 @@ func main() {
 	router.Get("/healthz", healthzHandler(func(ctx context.Context) error {
 		return db.Ping(ctx, database)
 	}))
-	task.RegisterRoutes(router, task.NewStore(database))
+	taskStore := task.NewStore(database)
+	task.RegisterRoutes(router, taskStore)
+	comment.RegisterRoutes(router, comment.NewStore(database), taskExister{store: taskStore})
 
 	addr := ":" + port()
 	log.Printf("listening on %s", addr)
 	if err := http.ListenAndServe(addr, router); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// taskExister adapts the task store to comment.TaskExister, so the comment
+// handler can 404 when a comment is posted to a non-existent task without
+// importing the task store's concrete type.
+type taskExister struct {
+	store task.TaskStore
+}
+
+func (t taskExister) TaskExists(ctx context.Context, id int64) (bool, error) {
+	_, err := t.store.GetByID(ctx, id)
+	if errors.Is(err, task.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // healthzHandler reports 200 when ping succeeds and 503 when it fails. The ping

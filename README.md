@@ -62,17 +62,37 @@ ba/
 ├── atlas.hcl            # Atlas env "bun": external_schema runs ./loader; dev = Postgres on 5434
 ├── compose.yaml         # Two Postgres 15 services: app DB (5433) + Atlas dev DB (5434)
 ├── Taskfile.yml         # go-task: db-up, db-down, run, migrate-diff, migrate-apply, migrate-status
-├── loader/main.go       # Atlas provider in program mode: registers &task.Task{} and prints its DDL
+├── loader/main.go       # Atlas provider in program mode: registers ALL models (Task, Comment)
 ├── go.mod / go.sum
 ├── migrations/          # Atlas-generated SQL + atlas.sum (created by `atlas migrate diff`)
 ├── internal/
-│   ├── task/
-│   │   ├── model.go     # the Bun Task model — single source of truth Atlas introspects
+│   ├── task/            # the Task feature (model + store + chi handlers)
+│   │   ├── model.go     # the Bun Task model — a source of truth Atlas introspects
 │   │   ├── store.go     # TaskStore interface + bunStore (NewInsert/NewSelect/NewUpdate/NewDelete)
 │   │   └── handler.go   # chi handlers + RegisterRoutes; depends on TaskStore, never *bun.DB
+│   ├── comment/         # the Comment feature — a SECOND model attached to a task by task_id
+│   │   ├── model.go     # the Bun Comment model (also registered in loader/main.go)
+│   │   ├── store.go     # CommentStore interface + bunStore
+│   │   └── handler.go   # chi handlers; 404s a comment posted to a missing task
 │   └── db/db.go         # Open(dsn) -> *bun.DB via pgdriver/pgdialect; Ping() for /healthz
-└── cmd/server/main.go   # entrypoint: read env, open db, mount chi router (/healthz + /tasks), serve
+└── cmd/server/main.go   # entrypoint: read env, open db, mount chi router (/healthz + /tasks + comments), serve
 ```
+
+### Multiple models
+
+Every Bun model the schema should contain is listed in the single `Load(...)`
+call in `loader/main.go`:
+
+```go
+bunschema.New(bunschema.DialectPostgres).Load(&task.Task{}, &comment.Comment{})
+```
+
+Adding a model means adding it there — then **one** `atlas migrate diff`
+regenerates the schema for all of them (the `comments` table arrived this way).
+`task_id` on a comment is a plain referencing column, **not** a DB-level foreign
+key: the Bun provider doesn't emit FK constraints, and a hand-added FK would
+drift on the next diff (see *Manual & data migrations* in the migrations guide).
+The relationship is enforced by the app — a comment on a missing task returns 404.
 
 ## Configuration
 
@@ -223,6 +243,36 @@ curl -i -X PUT http://localhost:8080/tasks/1 \
 
 # Delete (204)
 curl -i -X DELETE http://localhost:8080/tasks/1
+```
+
+## Comments API (the second model)
+
+Comments are attached to a task by `task_id` and demonstrate the multiple-models
+workflow. Same conventions as tasks (chi + Bun, `{"error": ...}` bodies).
+
+| Method   | Path                       | Body       | Success            | Errors                                  |
+| -------- | -------------------------- | ---------- | ------------------ | --------------------------------------- |
+| `POST`   | `/tasks/{taskID}/comments` | `{body}`   | `201` Comment      | `400` empty body / malformed; `404` task |
+| `GET`    | `/tasks/{taskID}/comments` | —          | `200` `[Comment]`  | `404` task missing                      |
+| `DELETE` | `/comments/{id}`           | —          | `204`              | `404` missing id                        |
+
+Posting or listing under a task that doesn't exist returns `404` (the app
+enforces the relationship, since `task_id` is not a DB foreign key).
+
+```json
+{ "id": 1, "task_id": 7, "body": "looks good", "created_at": "…", "updated_at": "…" }
+```
+
+```bash
+# Comment on task 7 (201; 404 if task 7 doesn't exist)
+curl -i -X POST http://localhost:8080/tasks/7/comments \
+  -H 'Content-Type: application/json' -d '{"body":"looks good"}'
+
+# List task 7's comments (200)
+curl http://localhost:8080/tasks/7/comments
+
+# Delete comment 1 (204)
+curl -i -X DELETE http://localhost:8080/comments/1
 ```
 
 ## The edit-model → diff → apply → run workflow
