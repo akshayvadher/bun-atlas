@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"ba/internal/db"
+	"ba/internal/task"
 )
 
 const (
@@ -26,6 +27,7 @@ func main() {
 	router.Get("/healthz", healthzHandler(func(ctx context.Context) error {
 		return db.Ping(ctx, database)
 	}))
+	task.RegisterRoutes(router, task.NewStore(database))
 
 	addr := ":" + port()
 	log.Printf("listening on %s", addr)

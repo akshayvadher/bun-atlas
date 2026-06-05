@@ -10,12 +10,12 @@ env:
 
 tasks:
   db-up:
-    desc: Start the Postgres container (app DB on host port 5433).
+    desc: Start BOTH Postgres containers — app DB (5433) and Atlas dev DB (5434).
     cmds:
       - podman compose up -d
 
   db-down:
-    desc: Stop and remove the Postgres container.
+    desc: Stop and remove both Postgres containers.
     cmds:
       - podman compose down
 
@@ -25,7 +25,7 @@ tasks:
       - go run ./cmd/server
 
   migrate-diff:
-    desc: Generate a versioned migration from the Bun model (uses a dev DB to compute the diff).
+    desc: Generate a versioned migration from the Bun model (uses the dev DB on 5434 to compute the diff). Needs the dev DB up.
     cmds:
       - atlas migrate diff --env bun
 
@@ -38,3 +38,15 @@ tasks:
     desc: Show which migrations have been applied to the app DB on 5433.
     cmds:
       - atlas migrate status --env bun -u "$DATABASE_URL"
+
+  test:
+    desc: Run the fast unit tests (no database required).
+    cmds:
+      - go test ./...
+
+  test-integration:
+    desc: Run DB integration tests against the podman Postgres (app DB on 5433)
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5433/tasks?sslmode=disable
+    cmds:
+      - go test -tags=integration ./...
