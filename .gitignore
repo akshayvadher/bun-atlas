@@ -1,0 +1,11 @@
+# Local Claude / Bee workflow state — not part of the project
+.claude/
+
+# Build output
+/server
+/server.exe
+*.exe
+
+# Scratch / local run logs
+.srv.out
+.srv.err
