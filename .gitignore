@@ -1,5 +1,7 @@
-# Local Claude / Bee workflow state — not part of the project
-.claude/
+# Local Claude / Bee workflow state — not part of the project.
+# (Skills under .claude/skills/ ARE tracked; only local state is ignored.)
+.claude/*.local.md
+.claude/settings.local.json
 
 # Build output
 /server
