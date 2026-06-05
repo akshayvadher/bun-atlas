@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -578,6 +579,24 @@ func TestDeleteMissingReturns404WithError(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", rec.Code)
+	}
+	if msg := decodeErrorBody(t, rec); msg == "" {
+		t.Error("expected a non-empty error message")
+	}
+}
+
+// --- store failures unrelated to lookup map to 500 with an error body ---
+
+func TestGetWhenStoreFailsReturns500WithError(t *testing.T) {
+	store := newFakeStore()
+	seeded := seedTask(t, store, "buy milk")
+	store.forcedErr = errors.New("connection refused")
+	srv := newTestServer(store)
+
+	rec := do(t, srv, http.MethodGet, "/tasks/"+itoa(seeded.ID), "")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d (body=%q)", rec.Code, rec.Body.String())
 	}
 	if msg := decodeErrorBody(t, rec); msg == "" {
 		t.Error("expected a non-empty error message")
